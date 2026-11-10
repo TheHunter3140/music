@@ -14,10 +14,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Décompresser et placer les fichiers
         run: |
+          set -euo pipefail
           shopt -s nullglob
+
           zips=(*.zip)
           if [ ${#zips[@]} -eq 0 ]; then
             echo "Aucun zip à la racine, rien à faire."
@@ -25,11 +29,19 @@ jobs:
           fi
 
           for z in "${zips[@]}"; do
+            echo "::group::Traitement de $z"
             tmp=$(mktemp -d)
+
+            # Sécurité : refuse les chemins absolus / .. dans l'archive
+            if unzip -l "$z" | awk 'NR>3 {print $4}' | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+              echo "::error::Archive $z contient des chemins non sûrs, ignorée."
+              rm -rf "$tmp"
+              continue
+            fi
+
             unzip -q "$z" -d "$tmp"
             rm -rf "$tmp/__MACOSX"
 
-            # Si le zip contient un seul dossier racine, on l'aplatit
             entries=("$tmp"/*)
             if [ ${#entries[@]} -eq 1 ] && [ -d "${entries[0]}" ]; then
               src="${entries[0]}"
@@ -38,14 +50,24 @@ jobs:
             fi
 
             cp -a "$src"/. .
-            git rm -q --cached "$z" 2>/dev/null || true
             rm -f "$z"
+            rm -rf "$tmp"
+            echo "::endgroup::"
           done
+
+          # Normalise les permissions (utile si zip créé sous macOS/Windows)
+          find . -path ./.git -prune -o -type f -exec chmod u+rw,go+r {} +
+          find . -path ./.git -prune -o -type d -exec chmod u+rwx,go+rx {} +
 
       - name: Commit et push
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -A
-          git diff --staged --quiet || git commit -m "Décompression automatique du zip"
+          if git diff --staged --quiet; then
+            echo "Rien à commit."
+            exit 0
+          fi
+          git commit -m "Décompression automatique du zip [skip ci]"
           git push
